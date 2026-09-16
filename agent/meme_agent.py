@@ -15,6 +15,8 @@ Usage:
 """
 
 import argparse
+import math
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -22,6 +24,20 @@ import json
 
 API_URL = "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools"
 USER_AGENT = "meme-trend-agent/1.0"
+
+# Base tokens that aren't meme coins -- majors, wrapped assets, and
+# stablecoins that otherwise show up in the generic trending-pools feed.
+NON_MEME_SYMBOLS = {
+    "SOL", "WSOL", "USDC", "USDT", "USDH", "PYUSD",
+    "BTC", "WBTC", "ETH", "WETH",
+}
+
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def sanitize(text):
+    """Strip terminal control characters from externally-supplied text."""
+    return _CONTROL_CHARS_RE.sub("", text)
 
 
 def fetch_page(page):
@@ -91,10 +107,30 @@ def format_usd(value):
     return f"${value:.2f}"
 
 
+def format_price(price):
+    if price <= 0:
+        return "$0.00"
+    if price >= 0.01:
+        return f"${price:.4f}"
+    # Sub-cent meme coin prices can be many orders of magnitude smaller than
+    # a fixed decimal count can show; scale precision to keep ~4 significant
+    # digits instead of rounding tiny prices down to zero.
+    magnitude = math.floor(math.log10(price))
+    decimals = min(-magnitude + 3, 18)
+    return f"${price:.{decimals}f}"
+
+
+def is_meme_pool(attrs):
+    base_symbol = attrs.get("name", "").split(" / ")[0].strip().upper()
+    return base_symbol not in NON_MEME_SYMBOLS
+
+
 def print_report(pools, top, min_liquidity):
     scored = []
     for pool in pools:
         attrs = pool.get("attributes", {})
+        if not is_meme_pool(attrs):
+            continue
         liquidity = to_float(attrs.get("reserve_in_usd"))
         if liquidity < min_liquidity:
             continue
@@ -110,7 +146,7 @@ def print_report(pools, top, min_liquidity):
     print(f"{'#':<3} {'Pair':<22} {'Price':<14} {'1h':>8} {'6h':>8} {'24h':>8} {'Vol 24h':>10} {'Liquidity':>10}  Flags")
     print("-" * 110)
     for rank, (score, pool, attrs) in enumerate(scored, start=1):
-        name = attrs.get("name", "?")[:22]
+        name = sanitize(attrs.get("name", "?"))[:22]
         price = to_float(attrs.get("base_token_price_usd"))
         change = attrs.get("price_change_percentage", {})
         h1 = to_float(change.get("h1"))
@@ -120,7 +156,7 @@ def print_report(pools, top, min_liquidity):
         liquidity = to_float(attrs.get("reserve_in_usd"))
         flags = ", ".join(risk_flags(attrs)) or "-"
 
-        price_str = f"${price:.8f}" if price < 0.01 else f"${price:.4f}"
+        price_str = format_price(price)
         print(
             f"{rank:<3} {name:<22} {price_str:<14} {h1:>7.1f}% {h6:>7.1f}% {h24:>7.1f}% "
             f"{format_usd(volume_h24):>10} {format_usd(liquidity):>10}  {flags}"
